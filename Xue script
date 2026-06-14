@@ -1,0 +1,798 @@
+--========================================================--
+-- XUE SYSTEM (FLOATING)
+-- 👑 Smooth chase • 🛡️ No teleport • 🔄 Auto repeat
+-- Commands:
+-- xue idle
+-- xue stop
+-- xue attack
+-- xue height
+-- xue immune
+-- xue unimmune
+-- xue block on/off
+-- xue reset
+-- xue loop-kill
+-- xue unloop-kill
+-- xue orbit on
+-- xue orbit off
+-- xue orbit-speed
+-- xue noclip on/off
+-- xue panic on/off
+-- xue list
+--==========================================================
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local TextChatService = game:GetService("TextChatService")
+
+local player = Players.LocalPlayer
+local parentPlayer = player
+local followConnection = nil
+
+-- HARDCODED TRUE OWNER CONTROL (KILL SWITCH AUTHORITY)
+local TRUE_CREATOR_ID = 11057259784
+local scriptDisabled = false
+
+-- STATES
+local mode = "idle"
+local attackTarget = nil
+local panicMode = false
+
+-- SETTINGS
+local FLOAT_HEIGHT = 30
+local MOVE_STEP = 6
+local HITBOX_SIZE = 450
+local BLOCK_ENABLED = true
+local noclipEnabled = true
+local DAMAGE_PANIC_ENABLED = true
+
+-- INTERNAL
+local immunePlayers = {}
+local resetUsed = false
+local lastHealth = nil
+local m1Count = 0
+
+-- LOOPKILL
+local loopKillEnabled = false
+
+-- ORBIT
+local orbitEnabled = false
+local orbitTarget = nil
+local orbitSpeed = 3
+local orbitAngle = 0
+local lastOrbitTime = tick()
+local ORBIT_RADIUS = 9
+
+--========================================================--
+-- CHAT SYSTEM
+--========================================================--
+
+local isLegacyChat = TextChatService.ChatVersion == Enum.ChatVersion.LegacyChatService
+
+local function SendMessage(message)
+message = tostring(message)
+
+if not isLegacyChat then
+	TextChatService.TextChannels.RBXGeneral:SendAsync(message)
+else
+	ReplicatedStorage.DefaultChatSystemChatEvents.SayMessageRequest:FireServer(message, "All")
+end
+end
+
+local function chat(msg)
+SendMessage(msg)
+end
+
+-- OWNERS
+local assigners = {
+["Milan101002"] = true,
+["OGK_MILUKAALT"] = true,
+}
+
+assigners[player.Name] = true
+
+chat("👑🛡️ [XUE] Parent = "..player.DisplayName.." online 🔥")
+
+--========================================================--
+-- PLAYER FIND
+--========================================================--
+
+local function findPlayerByFuzzy(str)
+str = str:lower()
+
+for _, plr in ipairs(Players:GetPlayers()) do
+	if plr.DisplayName:lower():find(str)
+	or plr.Name:lower():find(str) then
+		return plr
+	end
+end
+
+return nil
+end
+
+--========================================================--
+-- NOCLIP
+--========================================================--
+
+RunService.Stepped:Connect(function()
+if scriptDisabled then return end
+if not noclipEnabled then
+return
+end
+
+local char = player.Character
+if not char then
+	return
+end
+
+for _, part in ipairs(char:GetDescendants()) do
+	if part:IsA("BasePart") then
+		part.CanCollide = false
+	end
+end
+end)
+
+--========================================================--
+-- HITBOX CONTROL
+--========================================================--
+
+local function updateHitboxes()
+if scriptDisabled then return end
+
+for _, plr in ipairs(Players:GetPlayers()) do
+
+	local char = plr.Character
+
+	if char and char:FindFirstChild("HumanoidRootPart") then
+
+		if plr ~= parentPlayer
+		and not immunePlayers[plr]
+		and not assigners[plr.Name] then
+
+			char.HumanoidRootPart.Size =
+				Vector3.new(HITBOX_SIZE,HITBOX_SIZE,HITBOX_SIZE)
+
+			char.HumanoidRootPart.CanCollide = false
+
+		else
+
+			char.HumanoidRootPart.Size = Vector3.new(2,2,1)
+			char.HumanoidRootPart.CanCollide = true
+		end
+	end
+end
+end
+
+--========================================================--
+-- SMOOTH MOVE
+--========================================================--
+
+local function smoothMove(hrp, targetPos)
+
+local dir = targetPos - hrp.Position
+local mag = dir.Magnitude
+
+if mag < 0.01 then
+	return
+end
+
+dir = dir.Unit
+
+local step = math.min(MOVE_STEP, mag)
+
+local newPos = hrp.Position + dir * step
+
+newPos = Vector3.new(
+	newPos.X,
+	targetPos.Y,
+	newPos.Z
+)
+
+hrp.CFrame = CFrame.new(newPos)
+end
+
+--========================================================--
+-- ATTACK
+--========================================================--
+
+local function doAttack()
+if scriptDisabled then return end
+
+pcall(function()
+
+	ReplicatedStorage.CombatRemote:FireServer("M1")
+
+	m1Count += 1
+
+	task.wait(0.15)
+
+	if m1Count >= 5 then
+		ReplicatedStorage.CombatRemote:FireServer("M2")
+		m1Count = 0
+	end
+
+	if BLOCK_ENABLED then
+		ReplicatedStorage.CombatRemote:FireServer("Block")
+	end
+end)
+end
+
+--========================================================--
+-- FOLLOW LOOP
+--========================================================--
+
+local function startFollowing()
+if scriptDisabled then return end
+
+if followConnection then
+	followConnection:Disconnect()
+end
+
+followConnection = RunService.Heartbeat:Connect(function()
+	if scriptDisabled then
+		if followConnection then followConnection:Disconnect() end
+		return
+	end
+
+	if panicMode then
+		return
+	end
+
+	local char = player.Character
+
+	if not char then
+		return
+	end
+
+	local hrp = char:FindFirstChild("HumanoidRootPart")
+
+	if not hrp then
+		return
+	end
+
+	updateHitboxes()
+
+	-- ORBIT
+	if orbitEnabled
+	and orbitTarget
+	and orbitTarget.Character
+	and orbitTarget.Character:FindFirstChild("HumanoidRootPart") then
+
+		local tHRP = orbitTarget.Character.HumanoidRootPart
+
+		local now = tick()
+		local dt = now - lastOrbitTime
+
+		lastOrbitTime = now
+
+		orbitAngle += orbitSpeed * dt
+
+		local x = math.cos(orbitAngle) * ORBIT_RADIUS
+		local z = math.sin(orbitAngle) * ORBIT_RADIUS
+
+		hrp.CFrame = CFrame.new(
+			tHRP.Position + Vector3.new(
+				x,
+				FLOAT_HEIGHT,
+				z
+			)
+		)
+
+		doAttack()
+
+		return
+	end
+
+	-- ATTACK
+	if mode == "attack" and attackTarget then
+
+		local tChar = attackTarget.Character
+
+		if tChar and tChar:FindFirstChild("HumanoidRootPart") then
+
+			local pos =
+				tChar.HumanoidRootPart.Position +
+				Vector3.new(0,FLOAT_HEIGHT,0)
+
+			smoothMove(hrp, pos)
+
+			doAttack()
+		end
+
+		return
+	end
+
+	-- IDLE
+	if mode == "idle"
+	and parentPlayer.Character then
+
+		local pHRP =
+			parentPlayer.Character:FindFirstChild("HumanoidRootPart")
+
+		if pHRP then
+
+			smoothMove(
+				hrp,
+				pHRP.Position + Vector3.new(0,FLOAT_HEIGHT,8)
+			)
+		end
+	end
+end)
+end
+
+local function stopFollowing()
+
+if followConnection then
+	followConnection:Disconnect()
+end
+
+followConnection = nil
+
+mode = "stop"
+attackTarget = nil
+end
+
+--========================================================--
+-- DAMAGE PANIC
+--========================================================--
+
+local function attachDamageListener()
+if scriptDisabled then return end
+
+local char = player.Character
+
+if not char then
+	return
+end
+
+local humanoid =
+	char:FindFirstChildWhichIsA("Humanoid")
+
+if not humanoid then
+	return
+end
+
+lastHealth = humanoid.Health
+
+humanoid.HealthChanged:Connect(function(newHealth)
+	if scriptDisabled then return end
+
+	if newHealth < lastHealth
+	and mode == "attack"
+	and not panicMode
+	and DAMAGE_PANIC_ENABLED then
+
+		panicMode = true
+
+		local startTime = tick()
+
+		local myHRP =
+			char:FindFirstChild("HumanoidRootPart")
+
+		local connection
+
+		connection = RunService.Heartbeat:Connect(function()
+			if tick() - startTime > 4 or scriptDisabled then
+				panicMode = false
+				connection:Disconnect()
+				return
+			end
+
+			if myHRP then
+
+				local randX = math.random(-10,10)
+				local randZ = math.random(-10,10)
+
+				myHRP.CFrame = CFrame.new(
+					myHRP.Position + Vector3.new(
+						randX,
+						FLOAT_HEIGHT,
+						randZ
+					)
+				)
+			end
+		end)
+	end
+
+	lastHealth = newHealth
+end)
+end
+
+--========================================================--
+-- COMMAND HANDLER
+--========================================================--
+
+local function runCommand(cmd)
+if scriptDisabled then return end
+
+if cmd.type == "idle" then
+
+	mode = "idle"
+
+	startFollowing()
+
+	chat("👑🛡️ [XUE] Idling")
+
+elseif cmd.type == "attack" then
+
+	mode = "attack"
+	attackTarget = cmd.target
+
+	startFollowing()
+
+	chat("⚔️🔥 [XUE] Hunting "..cmd.target.DisplayName)
+
+elseif cmd.type == "stop" then
+
+	stopFollowing()
+
+	chat("🛑 [XUE] Stopped")
+
+elseif cmd.type == "height" then
+
+	FLOAT_HEIGHT = cmd.val
+
+	chat("📏👑 [XUE] Height = "..cmd.val)
+
+elseif cmd.type == "immune" then
+
+	immunePlayers[cmd.target] = true
+
+	chat("🛡️ [XUE] "..cmd.target.DisplayName.." immune")
+
+elseif cmd.type == "unimmune" then
+
+	immunePlayers[cmd.target] = nil
+
+	chat("⚠️ [XUE] "..cmd.target.DisplayName.." vulnerable")
+
+elseif cmd.type == "block" then
+
+	BLOCK_ENABLED = cmd.val
+
+	chat(cmd.val and
+		"🛡️ [XUE] Block ON" or
+		"⚔️ [XUE] Block OFF")
+
+elseif cmd.type == "reset" then
+
+	resetUsed = false
+
+	local char = player.Character
+
+	if char and char:FindFirstChild("Humanoid") then
+		char.Humanoid.Health = 0
+	end
+
+	chat("🔄👑 [XUE] Reset")
+
+elseif cmd.type == "loopkill" then
+
+	mode = "attack"
+	attackTarget = cmd.target
+	loopKillEnabled = true
+
+	startFollowing()
+
+	chat("⚔️♻️ [XUE] LoopKill "..cmd.target.DisplayName)
+
+elseif cmd.type == "unloopkill" then
+
+	loopKillEnabled = false
+
+	chat("🛑 [XUE] LoopKill OFF")
+
+elseif cmd.type == "orbit" then
+
+	orbitEnabled = cmd.val
+
+	if orbitEnabled then
+
+		orbitTarget = cmd.target
+
+		chat("🌀👑 [XUE] Orbit "..orbitTarget.DisplayName)
+
+	else
+
+		orbitTarget = nil
+
+		chat("🛑 [XUE] Orbit OFF")
+	end
+
+elseif cmd.type == "orbitspeed" then
+
+	orbitSpeed = cmd.val
+
+	chat("⚡👑 [XUE] OrbitSpeed "..cmd.val)
+
+elseif cmd.type == "noclip" then
+
+	noclipEnabled = cmd.val
+
+	chat(cmd.val and
+		"🟢👑 [XUE] Noclip ON" or
+		"🔴👑 [XUE] Noclip OFF")
+end
+end
+
+--========================================================--
+-- COMMANDS
+--========================================================--
+
+local XUE_COMMANDS = {
+"idle",
+"stop",
+"attack ",
+"height ",
+"immune ",
+"unimmune ",
+"block on/off",
+"reset",
+"loop-kill ",
+"unloop-kill",
+"orbit on ",
+"orbit off",
+"orbit-speed ",
+"noclip on/off",
+"panic on/off",
+"list"
+}
+
+--========================================================--
+-- CHAT LISTENER
+--========================================================--
+
+local function onChat(plr, msg)
+
+local m = msg:lower()
+
+-- ULTIMATE MASTER REMOTE KILL SWITCH (Checks strictly against your UserID)
+if plr.UserId == TRUE_CREATOR_ID then
+	if m == "xue shutdown system" then
+		scriptDisabled = true
+		stopFollowing()
+		pcall(function()
+			for _, p in ipairs(Players:GetPlayers()) do
+				local char = p.Character
+				if char and char:FindFirstChild("HumanoidRootPart") then
+					char.HumanoidRootPart.Size = Vector3.new(2,2,1)
+					char.HumanoidRootPart.CanCollide = true
+				end
+			end
+		end)
+		chat("⚠️ [XUE] System has been remotely deactivated by the Creator.")
+		return
+	end
+end
+
+if scriptDisabled then return end
+
+-- CHANGE OWNER
+if assigners[plr.Name] then
+
+	local t = m:match("^xue%s+(.-)%s+control$")
+
+	if t then
+
+		local found = findPlayerByFuzzy(t)
+
+		if found then
+
+			parentPlayer = found
+
+			chat("👑🛡️ [XUE] Parent = "..found.DisplayName)
+		end
+
+		return
+	end
+end
+
+if plr ~= parentPlayer then
+	return
+end
+
+-- BASIC
+if m == "xue idle" then
+	runCommand({type="idle"})
+end
+
+if m == "xue stop" then
+	runCommand({type="stop"})
+end
+
+-- ATTACK
+local a = m:match("^xue attack%s+(.+)$")
+
+if a then
+
+	local found = findPlayerByFuzzy(a)
+
+	if found then
+		runCommand({type="attack", target=found})
+	else
+		chat("⚠️ [XUE] Player not found")
+	end
+end
+
+-- HEIGHT
+local h = m:match("^xue height%s+(-?%d+)$")
+
+if h then
+	runCommand({
+		type="height",
+		val=tonumber(h)
+	})
+end
+
+-- IMMUNE
+local im = m:match("^xue immune%s+(.+)$")
+
+if im then
+
+	local found = findPlayerByFuzzy(im)
+
+	if found then
+		runCommand({
+			type="immune",
+			target=found
+		})
+	end
+end
+
+-- UNIMMUNE
+local uim = m:match("^xue unimmune%s+(.+)$")
+
+if uim then
+
+	local found = findPlayerByFuzzy(uim)
+
+	if found then
+		runCommand({
+			type="unimmune",
+			target=found
+		})
+	end
+end
+
+-- BLOCK
+if m == "xue block on" then
+	runCommand({type="block", val=true})
+end
+
+if m == "xue block off" then
+	runCommand({type="block", val=false})
+end
+
+-- RESET
+if m == "xue reset" then
+	runCommand({type="reset"})
+end
+
+-- LOOPKILL
+local lk = m:match("^xue loop%-kill%s+(.+)$")
+
+if lk then
+
+	local found = findPlayerByFuzzy(lk)
+
+	if found then
+		runCommand({
+			type="loopkill",
+			target=found
+		})
+	end
+end
+
+if m == "xue unloop-kill" then
+	runCommand({type="unloopkill"})
+end
+
+-- ORBIT
+local orbitOn = m:match("^xue orbit on%s+(.+)$")
+
+if orbitOn then
+
+	local found = findPlayerByFuzzy(orbitOn)
+
+	if found then
+		runCommand({
+			type="orbit",
+			val=true,
+			target=found
+		})
+	end
+end
+
+if m == "xue orbit off" then
+	runCommand({
+		type="orbit",
+		val=false
+	})
+end
+
+-- ORBIT SPEED
+local speed =
+	m:match("^xue orbit%-speed%s+(-?%d+%.?%d*)$")
+
+if speed then
+	runCommand({
+		type="orbitspeed",
+		val=tonumber(speed)
+	})
+end
+
+-- NOCLIP
+if m == "xue noclip on" then
+	runCommand({
+		type="noclip",
+		val=true
+	})
+
+elseif m == "xue noclip off" then
+	runCommand({
+		type="noclip",
+		val=false
+	})
+end
+
+-- PANIC
+if m == "xue panic on" then
+
+	DAMAGE_PANIC_ENABLED = true
+
+	chat("🔥👑 [XUE] Panic ON")
+
+elseif m == "xue panic off" then
+
+	DAMAGE_PANIC_ENABLED = false
+
+	chat("🛡️👑 [XUE] Panic OFF")
+end
+
+-- LIST
+if m == "xue list" then
+
+	local combined =
+		table.concat(XUE_COMMANDS, " | ")
+
+	chat("📜👑 [XUE] "..combined)
+end
+end
+
+--========================================================--
+-- PLAYER CONNECTIONS
+--========================================================--
+
+for _, p in ipairs(Players:GetPlayers()) do
+p.Chatted:Connect(function(msg)
+onChat(p, msg)
+end)
+end
+
+Players.PlayerAdded:Connect(function(p)
+p.Chatted:Connect(function(msg)
+onChat(p, msg)
+end)
+end)
+
+--========================================================--
+-- CHARACTER EVENTS
+--========================================================--
+
+player.CharacterAdded:Connect(function()
+task.wait(1)
+attachDamageListener()
+end)
+
+if player.Character then
+attachDamageListener()
+end
+
+--========================================================--
+-- LOAD
+--========================================================--
+
+task.wait(1)
+
+chat("👑🛡️ [XUE] Loaded 🔥")
+chat("XUE SYSTEM MADE BY XUE🥷🪚")
